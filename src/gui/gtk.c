@@ -55,7 +55,6 @@
 #endif
 #include <pthread.h>
 
-
 /*
  * NEW UI API
  */
