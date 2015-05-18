@@ -306,6 +306,9 @@ void dt_selection_select_list(struct dt_selection_t *selection, GList *list)
   dt_collection_hint_message(darktable.collection);
 }
 
+unsigned int dt_selection_count(struct dt_selection_t *selection){
+  return selection->collection->count;
+}
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent

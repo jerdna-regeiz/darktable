@@ -9,3 +9,4 @@ tools/iop_deps.pdf
 cscope.out
 .*.swp
 
+.ycm_extra_conf.py*
