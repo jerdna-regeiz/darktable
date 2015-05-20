@@ -99,6 +99,11 @@ void gui_cleanup(dt_lib_module_t *self)
   dt_control_signal_disconnect(darktable.signals, G_CALLBACK(_lib_modulelist_populate_callback), self);
   g_free(self->data);
   self->data = NULL;
+  // Remove self from view manager proxy
+  if( darktable.view_manager->proxy.more_module.module  == self ) {
+    darktable.view_manager->proxy.more_module.module = NULL;
+    darktable.view_manager->proxy.more_module.update = NULL;
+  }
 }
 
 enum

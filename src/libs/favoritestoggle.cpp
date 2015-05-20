@@ -18,6 +18,8 @@
  */
 
 #include <sstream>
+#include <iostream>
+#include <vector>
 /**
  * Most of darktable is pure c
  * */
@@ -37,6 +39,8 @@ extern "C" {
 #include <gdk/gdkkeysyms.h>
 #include "dtgtk/button.h"
 #include "common/file_location.h"
+#include "gui/presets.h"
+#include "develop/blend.h"
 }
 
 using namespace std;
@@ -178,6 +182,51 @@ namespace favoritestoggle{
     }
   }
 
+  static dt_develop_t* load_develop(int imgid) {
+    dt_develop_t *dev = new dt_develop_t();
+    dt_dev_init(dev, TRUE);
+    dt_dev_load_image(dev, imgid);
+    dt_iop_load_modules(dev);
+    return dev;
+  }
+
+  static dt_iop_module_t* get_module_instance(dt_develop_t* dev, dt_iop_module_so_t *module) {
+    GList *modules = dev->iop;
+    if(modules) {
+      do{
+        dt_iop_module_t *iop = (dt_iop_module_t *) modules->data;
+        if( iop->so == module ){
+          return iop;
+        }
+
+      } while( modules = g_list_next(modules) );
+    }
+    return NULL;
+  }
+
+  static void dt_save_and_unload(dt_develop_t *dev, int imgid, gboolean duplicate) {
+    dt_dev_write_history(dev);
+
+    /* if current image in develop reload history */
+    if(dt_dev_is_current_image(darktable.develop, imgid))
+    {
+      dt_dev_reload_history_items(darktable.develop);
+      dt_dev_modulegroups_set(darktable.develop, dt_dev_modulegroups_get(darktable.develop));
+    }
+
+    /* update xmp file */
+    dt_image_synch_xmp(imgid);
+    /* remove old obsolete thumbnails */
+    dt_mipmap_cache_remove(darktable.mipmap_cache, imgid);
+    /* if we have created a duplicate, reset collected images */
+    if(duplicate) dt_control_signal_raise(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED);
+    /* redraw center view to update visible mipmaps */
+    dt_control_queue_redraw_center();
+
+    // cleanup! free modules and develop
+    dt_dev_cleanup(dev);
+  }
+
   static void dt_togglefavorite_on_image(dt_iop_module_so_t *module, gboolean duplicate, int imgid, gboolean activate) {
     int newimgid = -1;
     if(duplicate)
@@ -224,6 +273,18 @@ namespace favoritestoggle{
     dt_dev_cleanup(dev);
   }
 
+  static vector<int> get_selected_imgs() {
+    vector<int> imgs;
+    sqlite3_stmt *stmt;
+    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "select * from selected_images", -1, &stmt, NULL);
+    while(sqlite3_step(stmt) == SQLITE_ROW)
+    {
+      imgs.push_back( sqlite3_column_int(stmt, 0) );
+    }
+    sqlite3_finalize(stmt);
+    return imgs;
+  }
+
   static void dt_togglefavorite_on_selection(dt_iop_module_so_t* module, gboolean duplicate) {
     gboolean selected = FALSE;
     gboolean enabled = FALSE;
@@ -258,13 +319,224 @@ namespace favoritestoggle{
     if(!selected) dt_control_log(_("no image selected!"));
   }
 
+  
+  static gchar *get_preset_name(GtkMenuItem *menuitem)
+  {
+    const gchar *name = gtk_label_get_label(GTK_LABEL(gtk_bin_get_child(GTK_BIN(menuitem))));
+    const gchar *c = name;
+  
+    // move to marker < if it exists
+    while(*c && *c != '<') c++;
+    if(!*c) c = name;
+  
+    // remove <-> markup tag at beginning.
+    if(*c == '<')
+    {
+      while(*c != '>') c++;
+      c++;
+    }
+    gchar *pn = g_strdup(c);
+    gchar *c2 = pn;
+    // possibly remove trailing <-> markup tag
+    while(*c2 != '<' && *c2 != '\0') c2++;
+    if(*c2 == '<') *c2 = '\0';
+    c2 = g_strrstr(pn, _("(default)"));
+    if(c2 && c2 > pn) *(c2 - 1) = '\0';
+    return pn;
+  }
 
+  static void apply_preset_on_image(gchar *preset, dt_iop_module_t *module) {
+    sqlite3_stmt *stmt;
+    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
+                                "select op_params, enabled, blendop_params, blendop_version, writeprotect from "
+                                "presets where operation = ?1 and op_version = ?2 and name = ?3",
+                                -1, &stmt, NULL);
+    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module->op, -1, SQLITE_TRANSIENT);
+    DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, module->version());
+    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, preset, -1, SQLITE_TRANSIENT);
+  
+    if(sqlite3_step(stmt) == SQLITE_ROW)
+    {
+      const void *op_params = sqlite3_column_blob(stmt, 0);
+      int op_length = sqlite3_column_bytes(stmt, 0);
+      int enabled = sqlite3_column_int(stmt, 1);
+      const void *blendop_params = sqlite3_column_blob(stmt, 2);
+      int bl_length = sqlite3_column_bytes(stmt, 2);
+      int blendop_version = sqlite3_column_int(stmt, 3);
+      int writeprotect = sqlite3_column_int(stmt, 4);
+      if(op_params && (op_length == module->params_size))
+      {
+        memcpy(module->params, op_params, op_length);
+        module->enabled = enabled;
+      }
+      if(blendop_params && (blendop_version == dt_develop_blend_version())
+         && (bl_length == sizeof(dt_develop_blend_params_t)))
+      {
+        memcpy(module->blend_params, blendop_params, sizeof(dt_develop_blend_params_t));
+      }
+      else if(blendop_params
+              && dt_develop_blend_legacy_params(module, blendop_params, blendop_version, module->blend_params,
+                                                dt_develop_blend_version(), bl_length) == 0)
+      {
+        // do nothing
+      }
+      else
+      {
+        memcpy(module->blend_params, module->default_blendop_params, sizeof(dt_develop_blend_params_t));
+      }
+  
+      if(!writeprotect) dt_gui_store_last_preset(preset);
+    }
+    sqlite3_finalize(stmt);
+    // Always enable the module, after a preset has been choosen
+    toggle_module(module, TRUE);
+  }
+
+  static void apply_preset_on_image(gchar *preset, dt_iop_module_so_t *module, int imgid, gboolean duplicate) {
+    // Create a duplicate, if requested
+    int newimgid = -1;
+    if(duplicate)
+    {
+      newimgid = dt_image_duplicate(imgid);
+      if(newimgid != -1) dt_history_copy_and_paste_on_image(imgid, newimgid, FALSE, NULL);
+    }else{
+      newimgid = imgid;
+    }
+    if( newimgid == -1 ){
+      dt_control_log(_("illegal imgid (duplicate failed?)!"));
+      return;
+    }
+
+    // get dt_iop_module_t instance
+    dt_develop_t* dev = load_develop(newimgid);
+    dt_iop_module_t* module_inst = get_module_instance(dev, module);
+    // apply preset
+    apply_preset_on_image(preset, module_inst);
+    // unload develop
+    dt_save_and_unload(dev, newimgid, duplicate);
+  }
+
+  static void apply_preset_on_selection(gchar *preset, dt_iop_module_so_t *module, gboolean duplicate) {
+    vector<int> imgs = get_selected_imgs();
+    for( vector<int>::iterator img = imgs.begin(); img != imgs.end(); ++img) {
+      apply_preset_on_image(preset, module, *img, duplicate);
+    }
+  }
+
+  //TODO: have two different callbacks for ctrl/duplicate or not
+  static void menuitem_pick_preset(GtkMenuItem *menuitem, dt_iop_module_so_t *module) {
+    gchar *preset = get_preset_name(menuitem);
+    cout << "Preset: " <<  preset << endl;
+    apply_preset_on_selection(preset, module, false);
+    g_free(preset);
+  }
+
+  GtkMenu* get_preset_popup_menu() {
+    // Create a new menu, destroying the old one if present
+    GtkMenu *menu = darktable.gui->presets_popup_menu;
+    if(menu) gtk_widget_destroy(GTK_WIDGET(menu));
+    darktable.gui->presets_popup_menu = GTK_MENU(gtk_menu_new());
+    menu = darktable.gui->presets_popup_menu;
+    return menu;
+  }
+
+  /** Called to show a popup menu of the available presets */
+  void prepare_presets_popup_menu(dt_iop_module_so_t* module) {
+    GtkMenu *menu = get_preset_popup_menu();
+  
+    GtkWidget *mi;
+    sqlite3_stmt *stmt;
+    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "select name, op_params, writeprotect, "
+                                                               "description, blendop_params, op_version, "
+                                                               "enabled from presets where operation=?1 "
+                                                               "order by writeprotect desc, name, rowid",
+                                -1, &stmt, NULL);
+    DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module->op, -1, SQLITE_TRANSIENT);
+
+    //int found = 0;
+    int cnt = 0;
+    while(sqlite3_step(stmt) == SQLITE_ROW)
+    {
+      // Read the row/preset
+      //void *op_params = (void *)sqlite3_column_blob(stmt, 1);
+      //int32_t op_params_size = sqlite3_column_bytes(stmt, 1);
+      //void *blendop_params = (void *)sqlite3_column_blob(stmt, 4);
+      //int32_t bl_params_size = sqlite3_column_bytes(stmt, 4);
+      int32_t preset_version = sqlite3_column_int(stmt, 5);
+      //int32_t enabled = sqlite3_column_int(stmt, 6);
+      //int32_t isdefault = 0;
+      int32_t isdisabled = (preset_version == module->version() ? 0 : 1);
+      const char *name = (char *)sqlite3_column_text(stmt, 0);
+      // See if the current preset was the last used
+      //if(darktable.gui->last_preset && strcmp(darktable.gui->last_preset, name) == 0) found = 1;
+      
+      //TODO: I abadoned showing default and current preset. default because I don't have an instance yet and preset
+      // becuse we might have multiple images selected. Could manage to compare all if everything is equal ...
+      // Both could be done thought, but I leave it for later
+      
+      // Use the preset name for a lable
+      mi = gtk_menu_item_new_with_label((const char *)name);
+  
+      if(isdisabled)
+      {
+        gtk_widget_set_sensitive(mi, 0);
+        g_object_set(G_OBJECT(mi), "tooltip-text", _("disabled: wrong module version"), (char *)NULL);
+      }
+      else
+      {
+        g_signal_connect(G_OBJECT(mi), "activate", G_CALLBACK(menuitem_pick_preset), module);
+        g_object_set(G_OBJECT(mi), "tooltip-text", sqlite3_column_text(stmt, 3), (char *)NULL);
+      }
+      gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
+      cnt++;
+    }
+    sqlite3_finalize(stmt);
+
+    if( cnt <= 0 ) {
+      //If there is no entry, show "no presets"
+      mi = gtk_menu_item_new_with_label(_("no presets"));
+      gtk_widget_set_sensitive(mi, 0);
+      gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
+    }
+  }
+
+  static void _preset_popup_position(GtkMenu *menu, gint *x, gint *y, gboolean *push_in, gpointer data)
+  {
+    GtkRequisition requisition = { 0 };
+    gdk_window_get_origin(gtk_widget_get_window(GTK_WIDGET(data)), x, y);
+    gtk_widget_get_preferred_size(GTK_WIDGET(menu), &requisition, NULL);
+  
+    GtkAllocation allocation;
+    gtk_widget_get_allocation(GTK_WIDGET(data), &allocation);
+
+    (*y) += allocation.y + allocation.height;
+    (*x) += allocation.x - ( MAX(requisition.width - allocation.width, 0) );
+
+  }
+
+  static void popup_callback(GtkButton *button, dt_iop_module_so_t *module)
+  {
+    prepare_presets_popup_menu(module);
+    gtk_menu_popup(darktable.gui->presets_popup_menu, NULL, NULL, _preset_popup_position, button, 0,
+                   gtk_get_current_event_time());
+    gtk_widget_show_all(GTK_WIDGET(darktable.gui->presets_popup_menu));
+    gtk_menu_reposition(GTK_MENU(darktable.gui->presets_popup_menu));
+  }
+
+  /** Gets called when a favorites button gets pressed */
   static int toggle_module_button_pressed(GtkWidget *widget, GdkEventButton *event, dt_iop_module_so_t *module)
   {
     if(darktable.gui->reset) return FALSE;
     //GdkModifierType modifiers = gtk_accelerator_get_default_mod_mask();
-
-    dt_togglefavorite_on_selection(module, event->state & GDK_CONTROL_MASK);
+    switch(event->button) {
+      case 1:
+      default:
+        dt_togglefavorite_on_selection(module, event->state & GDK_CONTROL_MASK);
+      break;
+      case 3:
+        popup_callback(GTK_BUTTON(widget), module);
+      break;
+    }
     return TRUE;
   }
 }
@@ -284,7 +556,7 @@ void gui_init(dt_lib_module_t *self) {
   GtkWidget *button;
 
   char option[1024];
-  GList *modules = darktable.iop
+  GList *modules = darktable.iop;
   if (modules) {
     /*
      * iterate over ip modules and detect if the modules should be shown
