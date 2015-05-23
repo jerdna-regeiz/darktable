@@ -18,7 +18,6 @@
  */
 
 #include <sstream>
-#include <iostream>
 #include <vector>
 /**
  * Most of darktable is pure c
@@ -68,7 +67,7 @@ void gui_init(dt_lib_module_t *self);
 void gui_cleanup(dt_lib_module_t *self);
 
 }
-
+/** The column width defining how many buttons shall be put into one row */
 #define COL_WIDTH 4
 
 const char *name() {
@@ -86,14 +85,15 @@ uint32_t container() {
 int position() {
   return 590;
 }
-
+/** currently there are no persistent data required */
 typedef struct dt_lib_favoritestoggle_t{
 } dt_lib_favoritestoggle_t;
 
 /** open a namespace for this module */
 namespace dt {
 namespace favoritestoggle{
-  
+
+  /** Falling back to black if nothing else is available */
   static const uint8_t fallback_pixel[4] = { 0, 0, 0, 0 };
   /** loads the pixbuf of an image from the given path
    * @param path the path to the file
@@ -112,12 +112,12 @@ namespace favoritestoggle{
     }
     return pixbuf;
   }
-  
+
   /** returns the pixbuf of the icon belonging to a given module
    * it will try .svg as well as .png and falls back to template.svg/.png
    * @param module the module of which the icon shall be loaded
    * */
-  GdkPixbuf* get_module_icon_pixbuf(dt_iop_module_so_t *module) {
+  static GdkPixbuf* get_module_icon_pixbuf(dt_iop_module_so_t *module) {
     int bs = DT_PIXEL_APPLY_DPI(12);
     /* add module icon */
     GdkPixbuf *pixbuf;
@@ -156,7 +156,7 @@ namespace favoritestoggle{
   /** Returns an icon as an GtkWidget for the given module
    * @param module the module to fetch the icon for
    **/
-  GtkWidget *get_module_gtk_icon(dt_iop_module_so_t *module) {
+  static GtkWidget *get_module_gtk_icon(dt_iop_module_so_t *module) {
     int bs = DT_PIXEL_APPLY_DPI(12);
     GdkPixbuf *pixbuf = get_module_icon_pixbuf(module);
     GtkWidget *wdg = gtk_image_new_from_pixbuf(pixbuf);
@@ -182,6 +182,9 @@ namespace favoritestoggle{
     }
   }
 
+  /** Creates a develop and loads the image as well as the modules
+   * @param imgid the id of the image to be loaded
+   * */
   static dt_develop_t* load_develop(int imgid) {
     dt_develop_t *dev = new dt_develop_t();
     dt_dev_init(dev, TRUE);
@@ -190,6 +193,11 @@ namespace favoritestoggle{
     return dev;
   }
 
+  /**
+   * Returns the instance of the module used in the develop
+   * @param dev the develop to take the instance from
+   * @param module the module_so which shall be fetched
+   * */
   static dt_iop_module_t* get_module_instance(dt_develop_t* dev, dt_iop_module_so_t *module) {
     GList *modules = dev->iop;
     if(modules) {
@@ -199,12 +207,17 @@ namespace favoritestoggle{
           return iop;
         }
 
-      } while( modules = g_list_next(modules) );
+      } while( (modules = g_list_next(modules)) );
     }
     return NULL;
   }
 
-  static void dt_save_and_unload(dt_develop_t *dev, int imgid, gboolean duplicate) {
+  /** Writes the history, sync xmp, invalidate cache, cleans up
+   * @param dev the develop used
+   * @param imgid the id of the image
+   * @param duplicate true if the edited image was duplicated
+   * */
+  static void save_and_cleanup(dt_develop_t *dev, int imgid, gboolean duplicate) {
     dt_dev_write_history(dev);
 
     /* if current image in develop reload history */
@@ -227,7 +240,11 @@ namespace favoritestoggle{
     dt_dev_cleanup(dev);
   }
 
-  static void dt_togglefavorite_on_image(dt_iop_module_so_t *module, gboolean duplicate, int imgid, gboolean activate) {
+  /** Returns either the same image id or a new one in case of a duplicte
+   * @param imgid the id of the image
+   * @param duplicate tells if the image shall be duplicated
+   * */
+  static int get_image_id(int imgid, gboolean duplicate) {
     int newimgid = -1;
     if(duplicate)
     {
@@ -236,43 +253,25 @@ namespace favoritestoggle{
     } else {
       newimgid = imgid;
     }
-
-    dt_develop_t *dev = new dt_develop_t();
-    dt_dev_init(dev, TRUE);
-    dt_dev_load_image(dev, newimgid);
-    dt_iop_load_modules(dev);
-    GList *modules = dev->iop;
-    if(modules) {
-      do{
-        dt_iop_module_t *iop = (dt_iop_module_t *) modules->data;
-        if( iop->so == module ){
-          toggle_module(iop, activate);
-        }
-
-      } while( modules = g_list_next(modules) );
-    }
-    dt_dev_write_history(dev);
-
-    /* if current image in develop reload history */
-    if(dt_dev_is_current_image(darktable.develop, newimgid))
-    {
-      dt_dev_reload_history_items(darktable.develop);
-      dt_dev_modulegroups_set(darktable.develop, dt_dev_modulegroups_get(darktable.develop));
-    }
-
-    /* update xmp file */
-    dt_image_synch_xmp(newimgid);
-    /* remove old obsolete thumbnails */
-    dt_mipmap_cache_remove(darktable.mipmap_cache, newimgid);
-    /* if we have created a duplicate, reset collected images */
-    if(duplicate) dt_control_signal_raise(darktable.signals, DT_SIGNAL_COLLECTION_CHANGED);
-    /* redraw center view to update visible mipmaps */
-    dt_control_queue_redraw_center();
-
-    // cleanup! free modules and develop
-    dt_dev_cleanup(dev);
+    return newimgid;
   }
 
+  /** Enables/disabled the given module on the image
+   * @param module the module to be enabled/disabled
+   * @param duplicate indicates if a duplicate shall be created
+   * */
+  static void togglefavorite_on_image(dt_iop_module_so_t *module, int imgid, gboolean duplicate, gboolean activate) {
+    int newimgid = get_image_id(imgid, duplicate);
+    // Load develop/image and modules
+    dt_develop_t *dev = load_develop(newimgid);
+    dt_iop_module_t *iop = get_module_instance(dev, module);
+    // Toggle the module
+    if(iop) toggle_module(iop, activate);
+    // Write history, synchronize and cleanup
+    save_and_cleanup(dev, newimgid, duplicate);
+  }
+
+  /** Returns a vector of all image images currently selected **/
   static vector<int> get_selected_imgs() {
     vector<int> imgs;
     sqlite3_stmt *stmt;
@@ -285,10 +284,12 @@ namespace favoritestoggle{
     return imgs;
   }
 
+  /** toggles the module on all selected images
+   * @param module the module which shall be toggled
+   * @param duplicate tells if a duplicate of the image shall be created
+   **/
   static void dt_togglefavorite_on_selection(dt_iop_module_so_t* module, gboolean duplicate) {
-    gboolean selected = FALSE;
     gboolean enabled = FALSE;
-
     sqlite3_stmt *stmt;
     // Select the count of images selected already having the module enabled
     DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
@@ -306,29 +307,28 @@ namespace favoritestoggle{
 
     // enable, if the count of enabled images is less than the count of selected images
     enabled = enabled_count < selected_count;
-    /* for each selected image apply style */
-    DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "select * from selected_images", -1, &stmt, NULL);
-    while(sqlite3_step(stmt) == SQLITE_ROW)
+    /* for each selected image toggle module */
+    vector<int> imgs = get_selected_imgs();
+    for(vector<int>::iterator imgid = imgs.begin(); imgid != imgs.end(); ++imgid)
     {
-      int imgid = sqlite3_column_int(stmt, 0);
-      dt_togglefavorite_on_image(module, duplicate, imgid, enabled );
-      selected = TRUE;
+      togglefavorite_on_image(module, *imgid, duplicate, enabled );
     }
-    sqlite3_finalize(stmt);
 
-    if(!selected) dt_control_log(_("no image selected!"));
+    if(imgs.size() == 0) dt_control_log(_("no image selected!"));
   }
 
-  
+  /** Gets the name of a preset from a given menuitem of the preset popup menu 
+   * @param menuitem the menu item to get the name from
+   **/
   static gchar *get_preset_name(GtkMenuItem *menuitem)
   {
     const gchar *name = gtk_label_get_label(GTK_LABEL(gtk_bin_get_child(GTK_BIN(menuitem))));
     const gchar *c = name;
-  
+
     // move to marker < if it exists
     while(*c && *c != '<') c++;
     if(!*c) c = name;
-  
+
     // remove <-> markup tag at beginning.
     if(*c == '<')
     {
@@ -345,6 +345,10 @@ namespace favoritestoggle{
     return pn;
   }
 
+  /** Applies a preset on a given image (loaded in module->dev)
+   * @param preset the name of the preset to be enabled
+   * @param module the module of the preset
+   * */
   static void apply_preset_on_image(gchar *preset, dt_iop_module_t *module) {
     sqlite3_stmt *stmt;
     DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db),
@@ -354,7 +358,7 @@ namespace favoritestoggle{
     DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 1, module->op, -1, SQLITE_TRANSIENT);
     DT_DEBUG_SQLITE3_BIND_INT(stmt, 2, module->version());
     DT_DEBUG_SQLITE3_BIND_TEXT(stmt, 3, preset, -1, SQLITE_TRANSIENT);
-  
+
     if(sqlite3_step(stmt) == SQLITE_ROW)
     {
       const void *op_params = sqlite3_column_blob(stmt, 0);
@@ -384,7 +388,7 @@ namespace favoritestoggle{
       {
         memcpy(module->blend_params, module->default_blendop_params, sizeof(dt_develop_blend_params_t));
       }
-  
+
       if(!writeprotect) dt_gui_store_last_preset(preset);
     }
     sqlite3_finalize(stmt);
@@ -392,16 +396,15 @@ namespace favoritestoggle{
     toggle_module(module, TRUE);
   }
 
+  /** Applies the preset of a module to an image
+   * @param preset the name of the preset to be applied
+   * @param module the module the preset belongs to
+   * @param imgid the id of the image the preset will be applied to
+   * @param duplicate if true, a duplicate is created
+   **/
   static void apply_preset_on_image(gchar *preset, dt_iop_module_so_t *module, int imgid, gboolean duplicate) {
     // Create a duplicate, if requested
-    int newimgid = -1;
-    if(duplicate)
-    {
-      newimgid = dt_image_duplicate(imgid);
-      if(newimgid != -1) dt_history_copy_and_paste_on_image(imgid, newimgid, FALSE, NULL);
-    }else{
-      newimgid = imgid;
-    }
+    int newimgid = get_image_id(imgid, duplicate);
     if( newimgid == -1 ){
       dt_control_log(_("illegal imgid (duplicate failed?)!"));
       return;
@@ -413,9 +416,14 @@ namespace favoritestoggle{
     // apply preset
     apply_preset_on_image(preset, module_inst);
     // unload develop
-    dt_save_and_unload(dev, newimgid, duplicate);
+    save_and_cleanup(dev, newimgid, duplicate);
   }
 
+  /** Applies the preset of a module to all images in the selection
+   * @param preset the name of the preset to be applied
+   * @param module the module the preset belongs to
+   * @param duplicate if true, a duplicate is created
+   **/
   static void apply_preset_on_selection(gchar *preset, dt_iop_module_so_t *module, gboolean duplicate) {
     vector<int> imgs = get_selected_imgs();
     for( vector<int>::iterator img = imgs.begin(); img != imgs.end(); ++img) {
@@ -423,14 +431,21 @@ namespace favoritestoggle{
     }
   }
 
-  //TODO: have two different callbacks for ctrl/duplicate or not
+  /** Called when a preset has been click*/
   static void menuitem_pick_preset(GtkMenuItem *menuitem, dt_iop_module_so_t *module) {
     gchar *preset = get_preset_name(menuitem);
-    cout << "Preset: " <<  preset << endl;
     apply_preset_on_selection(preset, module, false);
     g_free(preset);
   }
 
+  /** Called when a preset has been clicked and a duplicate shall be used */
+  static void menuitem_pick_preset_duplicate(GtkMenuItem *menuitem, dt_iop_module_so_t *module) {
+    gchar *preset = get_preset_name(menuitem);
+    apply_preset_on_selection(preset, module, true);
+    g_free(preset);
+  }
+
+  /** Returns the popup menu **/
   GtkMenu* get_preset_popup_menu() {
     // Create a new menu, destroying the old one if present
     GtkMenu *menu = darktable.gui->presets_popup_menu;
@@ -441,9 +456,9 @@ namespace favoritestoggle{
   }
 
   /** Called to show a popup menu of the available presets */
-  void prepare_presets_popup_menu(dt_iop_module_so_t* module) {
+  void prepare_presets_popup_menu(dt_iop_module_so_t* module, gboolean duplicate) {
     GtkMenu *menu = get_preset_popup_menu();
-  
+
     GtkWidget *mi;
     sqlite3_stmt *stmt;
     DT_DEBUG_SQLITE3_PREPARE_V2(dt_database_get(darktable.db), "select name, op_params, writeprotect, "
@@ -458,25 +473,14 @@ namespace favoritestoggle{
     while(sqlite3_step(stmt) == SQLITE_ROW)
     {
       // Read the row/preset
-      //void *op_params = (void *)sqlite3_column_blob(stmt, 1);
-      //int32_t op_params_size = sqlite3_column_bytes(stmt, 1);
-      //void *blendop_params = (void *)sqlite3_column_blob(stmt, 4);
-      //int32_t bl_params_size = sqlite3_column_bytes(stmt, 4);
       int32_t preset_version = sqlite3_column_int(stmt, 5);
-      //int32_t enabled = sqlite3_column_int(stmt, 6);
-      //int32_t isdefault = 0;
       int32_t isdisabled = (preset_version == module->version() ? 0 : 1);
       const char *name = (char *)sqlite3_column_text(stmt, 0);
       // See if the current preset was the last used
-      //if(darktable.gui->last_preset && strcmp(darktable.gui->last_preset, name) == 0) found = 1;
-      
-      //TODO: I abadoned showing default and current preset. default because I don't have an instance yet and preset
-      // becuse we might have multiple images selected. Could manage to compare all if everything is equal ...
-      // Both could be done thought, but I leave it for later
-      
+
       // Use the preset name for a lable
       mi = gtk_menu_item_new_with_label((const char *)name);
-  
+
       if(isdisabled)
       {
         gtk_widget_set_sensitive(mi, 0);
@@ -484,7 +488,11 @@ namespace favoritestoggle{
       }
       else
       {
-        g_signal_connect(G_OBJECT(mi), "activate", G_CALLBACK(menuitem_pick_preset), module);
+        if( duplicate ) {
+          g_signal_connect(G_OBJECT(mi), "activate", G_CALLBACK(menuitem_pick_preset_duplicate ), module);
+        } else {
+          g_signal_connect(G_OBJECT(mi), "activate", G_CALLBACK(menuitem_pick_preset), module);
+        }
         g_object_set(G_OBJECT(mi), "tooltip-text", sqlite3_column_text(stmt, 3), (char *)NULL);
       }
       gtk_menu_shell_append(GTK_MENU_SHELL(menu), mi);
@@ -500,12 +508,13 @@ namespace favoritestoggle{
     }
   }
 
+  /** Calculates the position of the popup menu to be aligned with the right edge of the button/widged/data but below */
   static void _preset_popup_position(GtkMenu *menu, gint *x, gint *y, gboolean *push_in, gpointer data)
   {
     GtkRequisition requisition = { 0 };
     gdk_window_get_origin(gtk_widget_get_window(GTK_WIDGET(data)), x, y);
     gtk_widget_get_preferred_size(GTK_WIDGET(menu), &requisition, NULL);
-  
+
     GtkAllocation allocation;
     gtk_widget_get_allocation(GTK_WIDGET(data), &allocation);
 
@@ -514,9 +523,14 @@ namespace favoritestoggle{
 
   }
 
-  static void popup_callback(GtkButton *button, dt_iop_module_so_t *module)
+  /** shows the popup menu for presets
+   * @param button the button which was pressed. Used for placement
+   * @param module the module for which presets shall be shown
+   * @param duplicate tells if a duplicate is to be created
+   * */
+  static void show_preset_popup_menu(GtkButton *button, dt_iop_module_so_t *module, gboolean duplicate)
   {
-    prepare_presets_popup_menu(module);
+    prepare_presets_popup_menu(module, duplicate);
     gtk_menu_popup(darktable.gui->presets_popup_menu, NULL, NULL, _preset_popup_position, button, 0,
                    gtk_get_current_event_time());
     gtk_widget_show_all(GTK_WIDGET(darktable.gui->presets_popup_menu));
@@ -527,14 +541,16 @@ namespace favoritestoggle{
   static int toggle_module_button_pressed(GtkWidget *widget, GdkEventButton *event, dt_iop_module_so_t *module)
   {
     if(darktable.gui->reset) return FALSE;
-    //GdkModifierType modifiers = gtk_accelerator_get_default_mod_mask();
+
     switch(event->button) {
       case 1:
       default:
+        // Left mouse button toggles
         dt_togglefavorite_on_selection(module, event->state & GDK_CONTROL_MASK);
       break;
       case 3:
-        popup_callback(GTK_BUTTON(widget), module);
+        // Right mouse button shows the preset popup
+        show_preset_popup_menu(GTK_BUTTON(widget), module, event->state & GDK_CONTROL_MASK);;
       break;
     }
     return TRUE;
@@ -564,21 +580,18 @@ void gui_init(dt_lib_module_t *self) {
     do {
       dt_iop_module_so_t *module = (dt_iop_module_so_t *) modules->data;
 
-      snprintf(option, sizeof(option), "plugins/darkroom/%s/favorite",
-          module->op);
+      snprintf(option, sizeof(option), "plugins/darkroom/%s/favorite", module->op);
       int fav = dt_conf_get_bool(option);
       if (fav) {
         stringstream tooltip;
         tooltip << "Toggle " << module->name() << " (ctrl+click for duplicate)";
         button = gtk_button_new();
         gtk_container_add((GtkContainer*)button, get_module_gtk_icon(module));
-        g_object_set(G_OBJECT(button), "tooltip-text", tooltip.str().c_str(), (char *) NULL);
+        g_object_set(G_OBJECT(button), "tooltip-text", _(tooltip.str().c_str()), (char *) NULL);
         gtk_grid_attach(grid, button, line % COL_WIDTH, line / COL_WIDTH, 1, 1);
+        g_signal_connect(G_OBJECT(button),  "button-press-event", G_CALLBACK(toggle_module_button_pressed), module);
+
         ++line;
-
-
-        g_signal_connect(G_OBJECT(button),  "button-press-event",
-            G_CALLBACK(toggle_module_button_pressed), module);
       }
     } while ((modules = g_list_next(modules)) != NULL);
   }
