@@ -19,6 +19,7 @@
 
 #include <sstream>
 #include <vector>
+#include <iostream>
 /**
  * Most of darktable is pure c
  * */
@@ -61,6 +62,10 @@ int position();
  * @param self pointer to the dt_lib_module_t struct belonging to this module
  * */
 void gui_init(dt_lib_module_t *self);
+/** Is called when the gui shall be updatesd
+ * @param self pointer to the dt_lib_module_t struct belonging to this module
+ **/
+void gui_update(dt_lib_module_t* self);
 /** cleans up any structes when gui is done
  * @param self pointer to the dt_lib_module_t struct belonging to this module
  * */
@@ -85,8 +90,10 @@ uint32_t container() {
 int position() {
   return 590;
 }
-/** currently there are no persistent data required */
+/** Stores the session persistend data */
 typedef struct dt_lib_favoritestoggle_t{
+  GtkGrid *grid;
+  vector<string> *favorites;
 } dt_lib_favoritestoggle_t;
 
 /** open a namespace for this module */
@@ -117,8 +124,7 @@ namespace favoritestoggle{
    * it will try .svg as well as .png and falls back to template.svg/.png
    * @param module the module of which the icon shall be loaded
    * */
-  static GdkPixbuf* get_module_icon_pixbuf(dt_iop_module_so_t *module) {
-    int bs = DT_PIXEL_APPLY_DPI(12);
+  static GdkPixbuf* get_module_icon_pixbuf(dt_iop_module_so_t *module, int size) {
     /* add module icon */
     GdkPixbuf *pixbuf;
     char filename[PATH_MAX] = { 0 };
@@ -126,41 +132,39 @@ namespace favoritestoggle{
     //dt_loc_get_datadir(datadir, sizeof(datadir));
     snprintf(datadir, sizeof(datadir), "%s", darktable.datadir);
 
-    // make the icons a little more visible
-    #define ICON_SIZE (bs * 1.7)
-
     // Try to get an icon specific to the module (prefer svg) or else fall back to the template
     snprintf(filename, sizeof(filename), "%s/pixmaps/plugins/darkroom/%s.svg", datadir, module->op);
-    pixbuf = load_image(filename, ICON_SIZE);
+    pixbuf = load_image(filename, size);
     if(pixbuf) return pixbuf;
 
     snprintf(filename, sizeof(filename), "%s/pixmaps/plugins/darkroom/%s.png", datadir, module->op);
-    pixbuf = load_image(filename, ICON_SIZE);
+    pixbuf = load_image(filename, size);
     if(pixbuf) return pixbuf;
 
     snprintf(filename, sizeof(filename), "%s/pixmaps/plugins/darkroom/template.svg", datadir);
-    pixbuf = load_image(filename, ICON_SIZE);
+    pixbuf = load_image(filename, size);
     if(pixbuf) return pixbuf;
 
     snprintf(filename, sizeof(filename), "%s/pixmaps/plugins/darkroom/template.png", datadir);
-    pixbuf = load_image(filename, ICON_SIZE);
+    pixbuf = load_image(filename, size);
     if(pixbuf) return pixbuf;
-
-    #undef ICON_SIZE
 
     // wow, we could neither load the SVG nor the PNG files. something is fucked up.
     pixbuf = gdk_pixbuf_new_from_data(fallback_pixel, GDK_COLORSPACE_RGB, TRUE, 8, 1, 1, 4, NULL, NULL);
     return pixbuf;
   }
 
+  static int get_image_size() {
+    return DT_PIXEL_APPLY_DPI(12) * 1.8;
+  }
+
   /** Returns an icon as an GtkWidget for the given module
    * @param module the module to fetch the icon for
    **/
   static GtkWidget *get_module_gtk_icon(dt_iop_module_so_t *module) {
-    int bs = DT_PIXEL_APPLY_DPI(12);
-    GdkPixbuf *pixbuf = get_module_icon_pixbuf(module);
+    int bs = get_image_size() ;
+    GdkPixbuf *pixbuf = get_module_icon_pixbuf(module, bs );
     GtkWidget *wdg = gtk_image_new_from_pixbuf(pixbuf);
-    gtk_widget_set_margin_start(GTK_WIDGET(wdg), DT_PIXEL_APPLY_DPI(5));
     gtk_widget_set_size_request(GTK_WIDGET(wdg), bs, bs);
     g_object_unref(pixbuf);
     return wdg;
@@ -317,7 +321,7 @@ namespace favoritestoggle{
     if(imgs.size() == 0) dt_control_log(_("no image selected!"));
   }
 
-  /** Gets the name of a preset from a given menuitem of the preset popup menu 
+  /** Gets the name of a preset from a given menuitem of the preset popup menu
    * @param menuitem the menu item to get the name from
    **/
   static gchar *get_preset_name(GtkMenuItem *menuitem)
@@ -560,20 +564,20 @@ namespace favoritestoggle{
 
 using namespace dt::favoritestoggle;
 
-void gui_init(dt_lib_module_t *self) {
-  dt_lib_favoritestoggle_t *d = (dt_lib_favoritestoggle_t *) malloc(sizeof(dt_lib_favoritestoggle_t) );
-  self->data = d;
-  self->widget = gtk_grid_new();
-  GtkGrid *grid = GTK_GRID(self->widget);
-  gtk_grid_set_row_spacing(grid, DT_PIXEL_APPLY_DPI(5));
-  gtk_grid_set_column_spacing(grid, DT_PIXEL_APPLY_DPI(5));
-  gtk_grid_set_column_homogeneous(grid, TRUE);
-  int line = 0;
+void gui_add_buttons(dt_lib_module_t *self, GtkGrid *grid) {
+  dt_lib_favoritestoggle_t *d = (dt_lib_favoritestoggle_t *)self->data;
   GtkWidget *button;
+  int line = 0;
+  int column = 0;
+
+  // Get the panel width, but leave some space for paddings
+  int panel_width = dt_conf_get_int("panel_width") - 90;
+  int line_width = 0;
 
   char option[1024];
   GList *modules = darktable.iop;
   if (modules) {
+    GtkRequisition requisition = { 0 };
     /*
      * iterate over ip modules and detect if the modules should be shown
      */
@@ -584,20 +588,118 @@ void gui_init(dt_lib_module_t *self) {
       int fav = dt_conf_get_bool(option);
       if (fav) {
         stringstream tooltip;
-        tooltip << "Toggle " << module->name() << " (ctrl+click for duplicate)";
+        tooltip << "Toggle " << module->name() << " (ctrl+click for duplicate, rightclick for presets)";
         button = gtk_button_new();
-        gtk_container_add((GtkContainer*)button, get_module_gtk_icon(module));
+        GtkWidget *icon = get_module_gtk_icon(module);
+        gtk_container_add((GtkContainer*)button, icon);
+        gtk_widget_show_all(button);
+        gtk_widget_get_preferred_size(GTK_WIDGET(icon), &requisition, NULL);
         g_object_set(G_OBJECT(button), "tooltip-text", _(tooltip.str().c_str()), (char *) NULL);
-        gtk_grid_attach(grid, button, line % COL_WIDTH, line / COL_WIDTH, 1, 1);
+        gtk_grid_attach(grid, button, column++, line, 1, 1);
         g_signal_connect(G_OBJECT(button),  "button-press-event", G_CALLBACK(toggle_module_button_pressed), module);
+        // Increase the with of the line and test if I should start a new line
+        line_width += requisition.width + DT_PIXEL_APPLY_DPI(5);
+        if( line_width >= panel_width - 15 ) {
+          //gtk_grid_insert_row(grid, line);
+          ++line;
+          column = 0;
+          line_width = 0;
+        }
 
-        ++line;
+        d->favorites->push_back(module->name());
       }
     } while ((modules = g_list_next(modules)) != NULL);
   }
 }
 
+/** Rebuilds the gui of the module
+ *@param self the pointer to the module itself
+ **/
+static void gui_rebuild(dt_lib_module_t *self) {
+  dt_lib_favoritestoggle_t *d = (dt_lib_favoritestoggle_t *)self->data;
+  //First remove all buttons
+  GList *buttons = gtk_container_get_children(GTK_CONTAINER(self->widget));
+  while( buttons ) {
+    gtk_widget_destroy(GTK_WIDGET(buttons->data));
+    buttons = g_list_next(buttons);
+  }
+
+  d->favorites->clear();
+
+  gui_add_buttons(self, d->grid);
+  gtk_widget_show_all(self->widget);
+}
+
+/** Tests if the gui requires a rebuild
+ *@param self the pointer to the module itself
+ **/
+gboolean gui_requires_rebuild(dt_lib_module_t* self) {
+  dt_lib_favoritestoggle_t *d = (dt_lib_favoritestoggle_t *)self->data;
+
+  char option[1024];
+  GList *modules = darktable.iop;
+  unsigned int count = 0;
+  if (modules) {
+    vector<string>::iterator stored = d->favorites->begin();
+    do {
+      dt_iop_module_so_t *module = (dt_iop_module_so_t *) modules->data;
+      snprintf(option, sizeof(option), "plugins/darkroom/%s/favorite", module->op);
+      int fav = dt_conf_get_bool(option);
+      if (fav) {
+        if( *stored != string(module->name()) ) {
+          // If there is a module we did not expect, we need to update
+          return true;
+        }
+        ++count;
+        ++stored;
+      }
+
+    } while ((modules = g_list_next(modules)) != NULL);
+  }
+  // Need to update, if size differs from the stored ones
+  return count != d->favorites->size();
+}
+
+/**Ensures the freshness of the gui (meaning that favorite modules are displayed)
+ * Triggered by a view change event.
+ * @param instance not used
+ * @param old_view not used
+ * @param new_view not used
+ * @param data a pointer (dt_lib_module_t* ) to the module itself
+ **/
+static void gui_refresh(gpointer instance, dt_view_t *old_view,
+                                dt_view_t *new_view, gpointer data)
+{
+  dt_lib_module_t *self = (dt_lib_module_t *)data;
+  if( gui_requires_rebuild(self) ) {
+    gui_rebuild(self);
+  }
+}
+
+/** Initialization of the gui
+ * @param self a pointer to the module itself
+ **/
+void gui_init(dt_lib_module_t *self) {
+  dt_lib_favoritestoggle_t *d = (dt_lib_favoritestoggle_t *) malloc(sizeof(dt_lib_favoritestoggle_t) );
+  self->data = d;
+  self->widget = gtk_grid_new();
+  GtkGrid *grid = GTK_GRID(self->widget);
+  gtk_grid_set_row_spacing(grid, DT_PIXEL_APPLY_DPI(5));
+  gtk_grid_set_column_spacing(grid, DT_PIXEL_APPLY_DPI(5));
+  gtk_grid_set_column_homogeneous(grid, TRUE);
+
+  d->grid = grid;
+  d->favorites = new vector<string>();
+
+  gui_add_buttons(self, grid);
+  // Connect to view change to get the buttons updated when favorites are added/removed
+  dt_control_signal_connect(darktable.signals, DT_SIGNAL_VIEWMANAGER_VIEW_CHANGED,
+                            G_CALLBACK(gui_refresh), self);
+}
+
 void gui_cleanup(dt_lib_module_t *self) {
+  dt_lib_favoritestoggle_t *d = (dt_lib_favoritestoggle_t *)self->data;
+  delete d->favorites;
 }
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
