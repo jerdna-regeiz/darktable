@@ -41,7 +41,7 @@ add_library(backgroundjobs MODULE "backgroundjobs.c")
 add_library(colorpicker MODULE "colorpicker.c")
 add_library(masks MODULE "masks.c")
 add_library(session MODULE "session.c")
-add_library(favoritestoggle MODULE "favoritestoggle.cpp")
+add_library(favoritestoggle MODULE "favoritestoggle.cc")
 
 # tools
 add_library(viewswitcher MODULE "tools/viewswitcher.c")
